@@ -11,6 +11,8 @@ Typecheck: `bun run typecheck`
 Lint: `bun run lint`
 Tests: `bun test`
 **Never run `bun run build` during dev** — pollutes `.next/` and breaks `bun run dev`.
+Exception: `bun run desktop:build` (via `scripts/stage-desktop.mjs`) is safe — it builds
+into `src-tauri/server/.next` through `OMP_WEB_DIST_DIR` and never touches the dev `.next/`.
 
 ### Everything runs on Bun
 
