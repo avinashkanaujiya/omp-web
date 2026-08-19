@@ -90,6 +90,8 @@ app/api/
   plugins/route.ts                GET/POST omp plugin management
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
+  web-access/route.ts             GET/PUT the password lock (settings -> Access)
+  web-access/recovery/route.ts    POST recovery code request/redeem (unauthenticated)
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -113,6 +115,7 @@ lib/
   worktree.ts          project/worktree resolution and git worktree operations
 
 components/
+  AccessConfig.tsx    password lock panel inside the settings modal
   AppShell.tsx        layout + URL state + tab management
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
@@ -259,6 +262,33 @@ Newer omp emits `compaction_start` / `compaction_end`; older versions emitted `a
 - API-key status endpoints must never return the raw key.
 - `models.yml` is YAML: `/api/models-config` parses whichever of `models.yml` / `models.yaml` / `models.json` exists and always writes back `models.yml`.
 - A header value in `models.yml` that names an environment variable is written as the **bare name** (`X-Token: MY_VAR`), not `$MY_VAR`.
+
+### Password access is verified in the proxy, stored hashed, and shared with `bin/`
+`bin/web-auth-store.js` is the single source of truth for the password lock, and
+it is CommonJS in `bin/` on purpose: the launcher needs it before Bun is even
+resolved, and `bin/` is the only directory (besides `.next`) in the published
+npm `files` list, so `lib/` cannot hold it. `bin/web-auth-store.d.ts` is what the
+TypeScript half type-checks against — keep the two in sync.
+
+- The password is stored **only** as a scrypt digest in
+  `<agentDir>/omp-web-auth.json` (`0600`, atomic replace). Nothing can read it
+  back, which is why `/recover` and `--reset-password` exist.
+- `proxy.ts` runs on Next.js 16's Node.js runtime (proxy always does), so
+  `node:fs` and `node:crypto` are available there. Do **not** import the omp SDK
+  into it — `next.config.ts` only externalizes `@oh-my-pi/*` for the server
+  build, and the SDK cannot be bundled. That is why the store re-derives the
+  agent directory instead of calling `getAgentDir()`.
+- `resolveWebAuthPolicy()` distinguishes a missing credential file (unlocked)
+  from an unreadable one (`unavailable` -> 503). Never collapse those: the
+  second one failing open would silently unlock the server.
+- Successful verifications are cached for five minutes keyed by the digest that
+  accepted them, because scrypt runs on every request otherwise. The key
+  includes the digest, so a password change invalidates the cache across
+  bundles.
+- `/recover` and `POST /api/web-access/recovery` are the only unauthenticated
+  paths. They still go through the host allow-list and cross-site checks, and
+  the recovery code is printed on the server's stdout, never returned in the
+  response.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` as `omp-sound-enabled` and reuses one `AudioContext`.
