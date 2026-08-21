@@ -108,6 +108,7 @@ lib/
   project-trust.ts     gates a project's executable resources
   rpc-manager.ts       AgentSessionWrapper + registry + startRpcSession
   session-reader.ts    session listing + path cache + buildSessionContext adapter
+  session-system-prompt.ts  SYSTEM.md / APPEND_SYSTEM.md resolution per session cwd
   session-title.ts     thin wrapper over omp's own title generator
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -225,6 +226,18 @@ store in `~/.omp/agent/omp-web-trusted-projects.json` and, for an untrusted
 project, filters project-local entries out of omp's discovered extension and
 custom-tool paths and disables MCP. Skills and rules are data and always load.
 See `docs/project-trust.md`.
+
+### `SYSTEM.md` / `APPEND_SYSTEM.md` are resolved per session cwd
+`omp` resolves both files before it creates a session and passes them as
+`customSystemPrompt` / `appendSystemPrompt`. `startRpcSession()` builds its own
+options, so `lib/session-system-prompt.ts` does the same for the browser: omp's
+`findConfigFile` (never a hand-rolled lookup) project-first then user-level,
+`resolvePromptInput` to read it, and omp's `applyResolvedSystemPromptInputs` to
+set the fields — so the text goes through the same templates the CLI renders it
+with. Every lookup is bound to the session's cwd, because the CLI's default
+(`getProjectDir()`) is the server's own directory here, not the project's.
+Project-local prompt files load for untrusted projects too: they are data, like
+skills and rules (`docs/project-trust.md`).
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
