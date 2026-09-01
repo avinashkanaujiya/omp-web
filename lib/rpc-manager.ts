@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
+  applyResolvedSystemPromptInputs,
   createAgentSession,
+  type CreateAgentSessionOptions,
   discoverSessionExtensionPaths,
   getAgentDir,
   initTheme,
@@ -26,6 +28,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { untrustedProjectSessionOptions } from "./project-trust";
+import { resolveSessionSystemPrompts } from "./session-system-prompt";
 import { readDefaultModelRole } from "./model-roles";
 import { getOmpRuntime, getSettingsForCwd } from "./omp-runtime";
 import { PRESET_FULL } from "./tool-presets";
@@ -205,14 +208,15 @@ function appendSlashCommand(
 }
 
 /** Browser-native builtins with no shared SDK handler; advertised with their canonical registry metadata. */
-const BROWSER_NATIVE_SLASH_COMMANDS = ["fork", "handoff"] as const;
+const BROWSER_NATIVE_SLASH_COMMANDS = ["fork"] as const;
 
 /**
  * Keep the browser palette aligned with omp's own command registry and
  * discovery pipeline. Shared text/ACP builtins and every discovered
  * extension/custom/MCP/file/skill command come from the SDK discovery;
- * browser-native /fork and /handoff are added explicitly from the canonical
- * builtin registry because they have no shared SDK handler yet.
+ * browser-native /fork is added explicitly from the canonical builtin registry
+ * because it has no shared SDK handler yet. /handoff gained one in omp 18, so
+ * it now arrives through discovery like every other shared builtin.
  */
 export async function getAvailableSlashCommands(session: AgentSessionLike): Promise<SlashCommandInfo[]> {
   const commands: SlashCommandInfo[] = [];
@@ -514,14 +518,14 @@ export class AgentSessionWrapper {
     }
   }
 
-  private async shutdownAfterCommittedTransition(kind: "fork" | "handoff", newSessionId: string): Promise<void> {
+  private async shutdownAfterCommittedFork(newSessionId: string): Promise<void> {
     try {
       await this.shutdown();
     } catch (error) {
-      // The replacement session is already persisted. Cleanup failures must
-      // not hide its id from the browser and strand the committed transition.
+      // The forked session is already persisted. Cleanup failures must not
+      // hide its id from the browser and strand the committed transition.
       console.error(
-        `[omp-web] ${kind} created session ${newSessionId}, but wrapper shutdown failed:`,
+        `[omp-web] fork created session ${newSessionId}, but wrapper shutdown failed:`,
         error instanceof Error ? error.message : error,
       );
     }
@@ -849,13 +853,16 @@ export class AgentSessionWrapper {
         const newSessionId = (await SessionManager.open(newSessionFile, sessionDir)).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
-        await this.shutdownAfterCommittedTransition("fork", newSessionId);
+        await this.shutdownAfterCommittedFork(newSessionId);
         return { cancelled: false, newSessionId };
       }
 
       case "handoff": {
-        // Handoff resets the agent and mints a replacement session, so it must
-        // not run while a prompt is streaming or any other work owns the session.
+        // omp 18 made handoff in-place: it summarizes the conversation into a
+        // handoff document and commits that as this session's compaction entry
+        // instead of minting a replacement session. It still rewrites history
+        // behind a oneshot model call, so it must not run while a prompt is
+        // streaming or any other work owns the session.
         if (this.handoffRunning || this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
           throw new Error("Cannot hand off while the session is busy");
         }
@@ -866,15 +873,10 @@ export class AgentSessionWrapper {
           // No result means the handoff was cancelled; the session is untouched.
           const result = await this.inner.handoff(customInstructions);
           if (!result) return { cancelled: true };
-          // The SDK mutates the session in place — capture the replacement ids
-          // before tearing the wrapper down so the old registry key cannot
-          // point at the transitioned session.
-          const newSessionId = this.inner.sessionId;
-          const newSessionFile = this.inner.sessionFile;
-          if (newSessionId && newSessionFile) cacheSessionPath(newSessionId, newSessionFile);
+          // The session id and file are unchanged, so only the cached listing
+          // (modified time, token counts) has gone stale.
           invalidateSessionListCache();
-          await this.shutdownAfterCommittedTransition("handoff", newSessionId);
-          return { cancelled: false, newSessionId };
+          return { cancelled: false };
         } finally {
           this.handoffRunning = false;
           notifyRunningChange();
@@ -1693,6 +1695,10 @@ export async function startRpcSession(
       ]);
       const untrusted = untrustedProjectSessionOptions(sessionCwd, agentDir, { extensionPaths, customToolPaths });
 
+      // `SYSTEM.md` / `APPEND_SYSTEM.md`, resolved against this session's cwd the
+      // way the CLI resolves them against its own (lib/session-system-prompt.ts).
+      const systemPrompts = await resolveSessionSystemPrompts(sessionCwd);
+
       const { modelRegistry } = runtime;
       const scope = await resolveVisibleModels(modelRegistry, settings.get("enabledModels"), settings);
       const defaultRole = readDefaultModelRole(settings);
@@ -1704,7 +1710,7 @@ export async function startRpcSession(
           ...(defaultRole ? { defaultModel: defaultRole } : {}),
           ...(thinkingLevel ? { thinkingLevel } : {}),
         });
-      const { session: inner, eventBus, setToolUIContext } = await createAgentSession({
+      const sessionOptions: CreateAgentSessionOptions = {
         cwd: sessionCwd,
         agentDir,
         settings,
@@ -1716,7 +1722,11 @@ export async function startRpcSession(
         ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
         ...(toolsOption !== undefined ? { toolNames: toolsOption, restrictToolNames: true } : {}),
         ...(untrusted ?? {}),
-      });
+      };
+      // omp's own applier, so a prompt file goes through the same templates the
+      // CLI renders it with instead of overwriting the whole system prompt.
+      applyResolvedSystemPromptInputs(sessionOptions, systemPrompts.systemPrompt, systemPrompts.appendPrompt);
+      const { session: inner, eventBus, setToolUIContext } = await createAgentSession(sessionOptions);
 
       const persistedPreferences = await persistExplicitStartupPreferences(
         runtime.settings,

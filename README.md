@@ -69,18 +69,45 @@ omp-web --port 8080              # custom port
 omp-web --hostname 0.0.0.0       # expose on a trusted network
 omp-web -p 8080 -H 0.0.0.0       # combine options
 omp-web --no-open                # do not open the browser automatically
+omp-web --authenticated          # require a password (asks for one if none is set)
+omp-web --reset-password         # set a new password when the old one is lost
 
 PORT=8080 omp-web                 # environment variable is also supported
 OMP_WEB_HOSTNAME=0.0.0.0 omp-web  # explicit network exposure
 OMP_WEB_ALLOWED_HOSTS=omp.internal omp-web  # allow an exact proxy/custom hostname
-OMP_WEB_PASSWORD='a-long-random-password' omp-web  # require Basic Auth (username: omp)
+OMP_WEB_AUTHENTICATED=1 omp-web   # same as --authenticated
+OMP_WEB_PASSWORD='a-long-random-password' omp-web  # override the stored password
 OMP_WEB_NO_OPEN=1 omp-web         # useful when running as a background service
 ```
 
-Set `OMP_WEB_PASSWORD` to protect the web interface and every API endpoint with HTTP Basic Auth. The username is always `omp`. Leaving the variable unset or empty disables authentication.
+## Docker
+
+A `Dockerfile` builds omp-web from source and runs it under Bun in the
+container. It still needs the omp home the CLI writes, so mount it:
+
+```bash
+OMP_WEB_PASSWORD='a-long-random-password' \
+OMP_UID=$(id -u) OMP_GID=$(id -g) docker compose up --build
+```
+
+That publishes <http://127.0.0.1:30141> with the password lock on, sharing
+`$HOME/.omp` with the container so terminal sessions continue in the browser.
+Volume layout, UID/GID matching and reverse-proxy notes: [docs/docker.md](./docs/docker.md).
+
+## Password access
+
+A password locks the web interface and every API endpoint behind HTTP Basic Auth, with the fixed username `omp`. Turn it on wherever suits you:
+
+- **Settings → Access** in the browser, to set the password and switch the lock on or off.
+- **`omp-web --authenticated`**, which turns it on for this run and every later one, and asks for a password on the terminal if none has been set yet.
+- **`OMP_WEB_PASSWORD`**, which overrides the stored credential for as long as it is set.
+
+The password is stored as a `scrypt` hash in `~/.omp/agent/omp-web-auth.json` (mode `0600`) — never in plaintext, and never recoverable from the file. Forgotten it? Run `omp-web --reset-password` on the server, or open `/recover` and enter the one-time code omp-web prints on its own console.
 
 omp-web can invoke a high-privilege agent. Basic Auth does not encrypt the password in transit, so do not expose plain HTTP to the internet. Use HTTPS through a trusted reverse proxy or a trusted VPN for remote access.
 API requests accept loopback names, IP literals, the selected bind hostname, and exact comma-separated names in `OMP_WEB_ALLOWED_HOSTS`. Configure that variable when a trusted reverse proxy uses a different external hostname.
+
+Full details, including the recovery threat model: [docs/authentication.md](./docs/authentication.md).
 
 ## Model roles
 
@@ -164,6 +191,7 @@ Requests to loopback addresses are never proxied, so a local provider (Ollama, L
 - **Data directory**: omp-web reads `~/.omp/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another omp agent directory (omp kept the variable name).
 - **Session files**: files are stored as `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Provider config**: the Models panel reads and writes `models.yml` in the omp agent directory. Credentials live in omp's `agent.db`, shared with the CLI. A header value that names an environment variable (bare name, no `$`) is substituted at request time.
+- **Custom system prompts**: `SYSTEM.md` and `APPEND_SYSTEM.md` are picked up for browser sessions exactly as `omp` picks them up in a terminal — the project's `.omp/` (or `.claude/`, `.codex/`, `.gemini/`) first, then `~/.omp/agent/` — resolved against the session's own working directory.
 - **Project trust**: opening a repository in a browser tab must not run its code, so omp-web gates a project's `.omp/extensions`, `.omp/hooks`, `.omp/tools` and `.mcp.json` behind an explicit trust decision. Skills and rules are data and load either way. See [Project trust](./docs/project-trust.md).
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
 - **Git worktrees**: see [Worktrees in omp-web](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
